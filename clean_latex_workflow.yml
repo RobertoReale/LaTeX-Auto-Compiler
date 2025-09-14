@@ -1,0 +1,213 @@
+name: Compile All LaTeX Documents
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  find-tex-files:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Find all .tex files
+      id: set-matrix
+      run: |
+        # Find all .tex files in the repository
+        tex_files=$(find . -name "*.tex" -type f | sed 's|^\./||' | jq -R -s -c 'split("\n")[:-1]')
+        echo "Found .tex files:"
+        echo $tex_files | jq .
+        echo "matrix=$tex_files" >> $GITHUB_OUTPUT
+
+  compile-latex:
+    needs: find-tex-files
+    runs-on: ubuntu-latest
+    container: texlive/texlive:latest  # Use container with pre-installed LaTeX
+    if: ${{ needs.find-tex-files.outputs.matrix != '[]' && needs.find-tex-files.outputs.matrix != '' }}
+    strategy:
+      matrix:
+        tex_file: ${{ fromJson(needs.find-tex-files.outputs.matrix) }}
+      fail-fast: false
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Get file info
+      id: file-info
+      run: |
+        tex_file="${{ matrix.tex_file }}"
+        dir_name=$(dirname "$tex_file")
+        base_name=$(basename "$tex_file" .tex)
+        
+        echo "Processing: $tex_file"
+        echo "Directory: $dir_name" 
+        echo "Base name: $base_name"
+        
+        echo "tex_file=$tex_file" >> $GITHUB_OUTPUT
+        echo "dir_name=$dir_name" >> $GITHUB_OUTPUT
+        echo "base_name=$base_name" >> $GITHUB_OUTPUT
+        echo "pdf_file=$dir_name/$base_name.pdf" >> $GITHUB_OUTPUT
+    
+    - name: Compile LaTeX document
+      run: |
+        cd "${{ steps.file-info.outputs.dir_name }}"
+        echo "Current directory: $(pwd)"
+        
+        tex_file="${{ steps.file-info.outputs.base_name }}.tex"
+        echo "Compiling: $tex_file"
+        
+        if [ -f "$tex_file" ]; then
+          # Compile LaTeX document (two passes for references)
+          pdflatex -interaction=nonstopmode -halt-on-error "$tex_file" && \
+          pdflatex -interaction=nonstopmode -halt-on-error "$tex_file"
+          
+          # Check if PDF was created
+          pdf_file="${{ steps.file-info.outputs.base_name }}.pdf"
+          if [ -f "$pdf_file" ]; then
+            echo "PDF created successfully: $pdf_file"
+          else
+            echo "PDF creation failed"
+            exit 1
+          fi
+        else
+          echo "TeX file not found: $tex_file"
+          exit 1
+        fi
+      continue-on-error: true
+    
+    - name: Check if PDF was created
+      id: check-pdf
+      run: |
+        pdf_file="${{ steps.file-info.outputs.pdf_file }}"
+        if [ -f "$pdf_file" ]; then
+          echo "pdf_exists=true" >> $GITHUB_OUTPUT
+          echo "PDF created successfully: $pdf_file"
+        else
+          echo "pdf_exists=false" >> $GITHUB_OUTPUT
+          echo "PDF creation failed for ${{ matrix.tex_file }}"
+          # Debug: show what's in the directory
+          echo "Files in directory:"
+          ls -la "$(dirname "${{ matrix.tex_file }}")" || echo "Directory not found"
+        fi
+    
+    - name: Upload PDF artifact
+      if: steps.check-pdf.outputs.pdf_exists == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: pdf-${{ steps.file-info.outputs.base_name }}-${{ github.run_number }}
+        path: ${{ steps.file-info.outputs.pdf_file }}
+        retention-days: 30
+
+  commit-pdfs:
+    needs: [find-tex-files, compile-latex]
+    runs-on: ubuntu-latest
+    if: ${{ always() && needs.find-tex-files.outputs.matrix != '[]' && needs.find-tex-files.outputs.matrix != '' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+    
+    - name: Download all PDF artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: pdf-*
+        path: downloaded-pdfs
+    
+    - name: Debug - List all downloaded content
+      run: |
+        echo "=== Downloaded artifacts structure ==="
+        find downloaded-pdfs -type f -name "*.pdf" | head -20
+        echo "=== Total PDF files found ==="
+        find downloaded-pdfs -name "*.pdf" | wc -l
+    
+    - name: Move PDFs to original locations and commit
+      run: |
+        # Configure git
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        
+        # Flag to check if there are changes
+        changes_made=false
+        
+        echo "=== Processing downloaded PDFs ==="
+        
+        # Search for all PDFs in artifact subfolders
+        find downloaded-pdfs -name "*.pdf" -type f | while read pdf_path; do
+          pdf_file=$(basename "$pdf_path")
+          echo "Processing: $pdf_file from $pdf_path"
+          
+          # Search for corresponding .tex file
+          tex_name="${pdf_file%.pdf}.tex"
+          tex_location=$(find . -name "$tex_name" -type f | head -1)
+          
+          if [ -n "$tex_location" ]; then
+            target_dir=$(dirname "$tex_location")
+            target_path="$target_dir/$pdf_file"
+            
+            echo "Moving $pdf_file to $target_path"
+            cp "$pdf_path" "$target_path"
+            git add "$target_path"
+            echo "changes_made=true" > /tmp/changes_flag
+          else
+            echo "Could not find .tex file for $pdf_file"
+          fi
+        done
+        
+        # Check if there were changes
+        if [ -f /tmp/changes_flag ]; then
+          echo "=== Committing changes ==="
+          git status
+          
+          if git diff --staged --quiet; then
+            echo "No staged changes to commit"
+          else
+            if git commit -m "Auto-update compiled PDFs [skip ci]"; then
+              echo "Pushing changes..."
+              if git push; then
+                echo "PDFs committed and pushed successfully"
+              else
+                echo "Push failed"
+                git status
+              fi
+            else
+              echo "Commit failed"
+            fi
+          fi
+        else
+          echo "No PDFs were moved"
+        fi
+
+  summary:
+    needs: [find-tex-files, compile-latex]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Compilation Summary
+      run: |
+        echo "## LaTeX Compilation Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        files='${{ needs.find-tex-files.outputs.matrix }}'
+        if [ "$files" = "[]" ] || [ "$files" = "" ]; then
+          echo "**Files found:** 0" >> $GITHUB_STEP_SUMMARY
+          echo "- *No .tex files found in repository*" >> $GITHUB_STEP_SUMMARY
+        else
+          file_count=$(echo "$files" | jq '. | length')
+          echo "**Files found:** $file_count" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Files processed:" >> $GITHUB_STEP_SUMMARY
+          
+          echo "$files" | jq -r '.[]' | while read file; do
+            echo "- \`$file\`" >> $GITHUB_STEP_SUMMARY
+          done
+        fi
