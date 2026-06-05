@@ -4,19 +4,19 @@ A GitHub Actions workflow that automatically finds, compiles, and commits all La
 
 ## Features
 
-- **Automatic Discovery**: Finds all `.tex` files in your repository automatically
-- **Parallel Compilation**: Compiles multiple LaTeX documents simultaneously using a matrix strategy
+- **Smart Root Detection**: Only compiles root documents (files containing `\documentclass`), skipping sub-files and inputs automatically
 - **Full TeXLive Environment**: Uses the complete TeXLive Docker container for maximum compatibility
+- **`latexmk` Compilation**: Handles bibliographies (BibTeX/Biber), indexes, and multi-pass references automatically
 - **Auto-Commit**: Automatically commits compiled PDFs back to the repository on main/master branches
-- **Artifact Storage**: Uploads PDFs as GitHub artifacts with 30-day retention
-- **Comprehensive Reporting**: Provides detailed summaries of compilation results
-- **Error Handling**: Continues processing other files even if one fails to compile
+- **Artifact Storage**: Uploads all PDFs as a single artifact with 30-day retention
+- **Concurrency Control**: Cancels redundant runs when you push multiple times in quick succession
+- **Error Resilience**: Continues processing other files even if one fails to compile
 
 ## Quick Setup
 
 ### 1. Copy the Workflow File
 
-Create the directory `.github/workflows/` in your repository and copy the `latex.yml` file into it.
+Create the directory `.github/workflows/` in your repository and copy `clean_latex_workflow.yml` into it, renaming it to `latex.yml` (or any `.yml` name you prefer).
 
 ### 2. Enable GitHub Actions Permissions
 
@@ -41,14 +41,15 @@ The workflow runs automatically on:
 - Push to `main` or `master` branch
 - Pull requests to `main` or `master` branch
 
+If you push multiple commits in quick succession, the workflow cancels the previous run and starts fresh (concurrency control).
+
 ### Compilation Process
 
-1. **Discovery**: Scans the entire repository for `.tex` files
-2. **Matrix Build**: Creates a parallel compilation job for each LaTeX document found
-3. **Compilation**: Runs `pdflatex` twice on each document (for proper reference resolution)
-4. **Artifact Upload**: Stores compiled PDFs as downloadable artifacts
-5. **Auto-Commit**: On main/master branches, commits PDFs back to their original locations
-6. **Summary**: Generates a detailed report of the compilation process
+1. **Discovery**: Scans the entire repository for `.tex` files that contain `\documentclass` (root documents only)
+2. **Compilation**: Runs `latexmk -pdf` on each document — handles bibliographies, indexes, and multiple passes automatically
+3. **Artifact Upload**: Bundles all compiled PDFs into a single downloadable artifact
+4. **Auto-Commit**: On main/master push events, commits PDFs back to their original locations
+5. **Summary**: Generates a table report showing compiled vs. failed files
 
 ### Directory Structure Preserved
 
@@ -75,6 +76,10 @@ docs/
 └── references.pdf
 ```
 
+### Sub-files Are Skipped Automatically
+
+If your project uses `\input{}` or `\include{}` to split the document across multiple `.tex` files, only the root file (the one with `\documentclass`) will be compiled. Sub-files without `\documentclass` are ignored.
+
 ## Usage Examples
 
 ### Basic Usage
@@ -82,32 +87,24 @@ docs/
 2. Push to main/master branch
 3. The workflow automatically compiles it and commits the PDF
 
-### Multiple Documents
-The workflow handles any number of LaTeX documents across any directory structure. Each document is compiled independently.
+### Projects with Bibliographies
+No extra configuration needed — `latexmk` automatically runs Biber/BibTeX and re-runs pdflatex as many times as needed.
 
-### LaTeX Packages
-The workflow uses the full TeXLive distribution, so most LaTeX packages are available. If you need specific packages, they should work out of the box.
+### Multiple Documents
+The workflow handles any number of LaTeX documents across any directory structure. Each root document is compiled in sequence.
 
 ## Workflow Jobs
 
-### 1. Find TeX Files
-- Discovers all `.tex` files in the repository
-- Creates a matrix for parallel processing
+### 1. `compile-latex`
+- Discovers all root `.tex` files (`\documentclass` present)
+- Compiles each with `latexmk -pdf`
+- Collects all generated PDFs and uploads them as one artifact
+- Outputs a summary table to the Actions run page
 
-### 2. Compile LaTeX
-- Runs in parallel for each discovered file
-- Uses TeXLive container for compilation
-- Runs pdflatex twice for proper references
-- Uploads successful compilations as artifacts
-
-### 3. Commit PDFs
-- Downloads all compiled PDFs
-- Places them next to their source `.tex` files
-- Commits changes to the repository (main/master only)
-
-### 4. Summary
-- Provides a detailed report of compilation results
-- Shows which files were processed successfully
+### 2. `commit-pdfs`
+- Runs only on push to main/master (not on pull requests)
+- Downloads the artifact and places each PDF next to its source `.tex` file
+- Commits and pushes only if PDFs actually changed
 
 ## Customization
 
@@ -119,14 +116,15 @@ on:
     branches: [ main, master, your-branch ]
 ```
 
-### Adjusting Compilation Options
-Modify the pdflatex command in the "Compile LaTeX document" step:
+### Adjusting `latexmk` Options
+Modify the `latexmk` command in the compile step:
 ```bash
-pdflatex -interaction=nonstopmode -halt-on-error "$tex_file"
+latexmk -pdf -interaction=nonstopmode -halt-on-error "$base_name.tex"
 ```
+For example, add `-xelatex` or `-lualatex` if your document requires a different engine.
 
 ### Artifact Retention
-Change the retention period in the "Upload PDF artifact" step:
+Change the retention period in the "Upload all PDFs" step:
 ```yaml
 retention-days: 30  # Change to desired number of days
 ```
@@ -137,13 +135,13 @@ retention-days: 30  # Change to desired number of days
 Ensure you've enabled "Read and write permissions" in the repository settings as described in the setup section.
 
 ### Compilation Failures
-Check the workflow logs for specific LaTeX errors. The workflow continues processing other files even if one fails.
+Check the workflow logs for specific LaTeX errors. The workflow continues processing other files even if one fails, and the summary table shows which files failed.
 
 ### Missing PDFs
-PDFs are only committed to main/master branches. On other branches, they're available as downloadable artifacts.
+PDFs are only committed to main/master branches on `push` events. On pull requests, they're available as a downloadable artifact.
 
 ### Package Not Found Errors
-The workflow uses the full TeXLive distribution. If you encounter package errors, the issue is likely in your LaTeX code rather than missing packages.
+The workflow uses the full TeXLive distribution. If you encounter package errors, the issue is likely in your LaTeX source rather than missing packages.
 
 ## Security Notes
 
