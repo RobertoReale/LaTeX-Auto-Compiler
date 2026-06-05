@@ -45,13 +45,18 @@ jobs:
         dir_name=$(dirname "$tex_file")
         base_name=$(basename "$tex_file" .tex)
         
+        # Create a safe name for the artifact by replacing / with -
+        safe_name=$(echo "$tex_file" | sed 's/\.tex$//' | tr '/' '-')
+        
         echo "Processing: $tex_file"
         echo "Directory: $dir_name" 
         echo "Base name: $base_name"
+        echo "Safe name: $safe_name"
         
         echo "tex_file=$tex_file" >> $GITHUB_OUTPUT
         echo "dir_name=$dir_name" >> $GITHUB_OUTPUT
         echo "base_name=$base_name" >> $GITHUB_OUTPUT
+        echo "safe_name=$safe_name" >> $GITHUB_OUTPUT
         echo "pdf_file=$dir_name/$base_name.pdf" >> $GITHUB_OUTPUT
     
     - name: Compile LaTeX document
@@ -63,9 +68,8 @@ jobs:
         echo "Compiling: $tex_file"
         
         if [ -f "$tex_file" ]; then
-          # Compile LaTeX document (two passes for references)
-          pdflatex -interaction=nonstopmode -halt-on-error "$tex_file" && \
-          pdflatex -interaction=nonstopmode -halt-on-error "$tex_file"
+          # Compile LaTeX document using latexmk for automatic bibliography and multiple passes
+          latexmk -pdf -interaction=nonstopmode -halt-on-error "$tex_file"
           
           # Check if PDF was created
           pdf_file="${{ steps.file-info.outputs.base_name }}.pdf"
@@ -96,12 +100,19 @@ jobs:
           ls -la "$(dirname "${{ matrix.tex_file }}")" || echo "Directory not found"
         fi
     
+    - name: Prepare artifact
+      if: steps.check-pdf.outputs.pdf_exists == 'true'
+      run: |
+        # Preserve directory structure for the artifact
+        mkdir -p "artifact-payload/${{ steps.file-info.outputs.dir_name }}"
+        cp "${{ steps.file-info.outputs.pdf_file }}" "artifact-payload/${{ steps.file-info.outputs.dir_name }}/"
+
     - name: Upload PDF artifact
       if: steps.check-pdf.outputs.pdf_exists == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: pdf-${{ steps.file-info.outputs.base_name }}-${{ github.run_number }}
-        path: ${{ steps.file-info.outputs.pdf_file }}
+        name: pdf-${{ steps.file-info.outputs.safe_name }}-${{ github.run_number }}
+        path: artifact-payload/
         retention-days: 30
 
   commit-pdfs:
@@ -135,55 +146,40 @@ jobs:
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         
-        # Flag to check if there are changes
-        changes_made=false
-        
         echo "=== Processing downloaded PDFs ==="
         
-        # Search for all PDFs in artifact subfolders
-        find downloaded-pdfs -name "*.pdf" -type f | while read pdf_path; do
-          pdf_file=$(basename "$pdf_path")
-          echo "Processing: $pdf_file from $pdf_path"
-          
-          # Search for corresponding .tex file
-          tex_name="${pdf_file%.pdf}.tex"
-          tex_location=$(find . -name "$tex_name" -type f | head -1)
-          
-          if [ -n "$tex_location" ]; then
-            target_dir=$(dirname "$tex_location")
-            target_path="$target_dir/$pdf_file"
-            
-            echo "Moving $pdf_file to $target_path"
-            cp "$pdf_path" "$target_path"
-            git add "$target_path"
-            echo "changes_made=true" > /tmp/changes_flag
-          else
-            echo "Could not find .tex file for $pdf_file"
+        # The artifacts are downloaded to downloaded-pdfs/<artifact-name>/
+        # Since we preserved the directory structure inside the artifacts,
+        # we can just copy the contents of each artifact directory to the root.
+        shopt -s dotglob
+        for artifact_dir in downloaded-pdfs/*; do
+          if [ -d "$artifact_dir" ]; then
+            echo "Copying contents of $artifact_dir"
+            cp -r "$artifact_dir"/* ./ || true
           fi
         done
         
-        # Check if there were changes
-        if [ -f /tmp/changes_flag ]; then
-          echo "=== Committing changes ==="
-          git status
-          
-          if git diff --staged --quiet; then
-            echo "No staged changes to commit"
-          else
-            if git commit -m "Auto-update compiled PDFs [skip ci]"; then
-              echo "Pushing changes..."
-              if git push; then
-                echo "PDFs committed and pushed successfully"
-              else
-                echo "Push failed"
-                git status
-              fi
-            else
-              echo "Commit failed"
-            fi
-          fi
+        echo "=== Committing changes ==="
+        # Add all pdfs outside of the downloaded-pdfs folder
+        find . -name "*.pdf" -not -path "./downloaded-pdfs/*" -exec git add {} +
+        git status
+        
+        if git diff --staged --quiet; then
+          echo "No staged changes to commit"
         else
-          echo "No PDFs were moved"
+          if git commit -m "Auto-update compiled PDFs [skip ci]"; then
+            echo "Pushing changes..."
+            if git push; then
+              echo "PDFs committed and pushed successfully"
+            else
+              echo "Push failed"
+              git status
+              exit 1
+            fi
+          else
+            echo "Commit failed"
+            exit 1
+          fi
         fi
 
   summary:
